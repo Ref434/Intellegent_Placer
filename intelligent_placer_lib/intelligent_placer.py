@@ -1,3 +1,4 @@
+from imageio.core.util import Array
 import cv2
 import os
 import math
@@ -10,6 +11,13 @@ from skimage.morphology import binary_closing,  binary_opening
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import regionprops
 from skimage.measure import label as sk_measure_label
+from dataclasses import dataclass
+from enum import Enum
+
+class Cases(Enum):
+    TRUE = 1
+    FALSE = 2
+    ERROR = 3
 
 
 class Config():
@@ -30,22 +38,26 @@ class Config():
     source_image_path = "data\Objects"
     input_image_path = "data\InputData"
 
+
+
+
+@dataclass
 class Image():
 
     name: str = None
-    case: str = None  # values : True, False, Error
-    origin = None
+    case: Cases = None  # values : True, False, Error
+    origin: Array = None
     mask = None
     polygon = None
-    result: str = None  # values : True, False, Error
+    result: Cases = None  # values : True, False, Error
+    polygon_area: float = None
+    items_area: float = None
+    fit = None
+    items = []
+    result_image = None
+    test = []
 
-    def __init__(self, image_name: str, image_case: str, image):
-
-        self.name = image_name
-        self.case = image_case
-        self.origin = image
-
-        
+      
 
 def get_central_component(mask, config):
 
@@ -68,20 +80,47 @@ def get_central_component(mask, config):
 
         i += 1
 
-
     return labels == (central_comp_id + 1)
 
-def polygon_detection(mask):
+def find_area(image: Image):
+    labels_polygon = sk_measure_label(image.polygon)
+    labels_image  = sk_measure_label(image.mask)
 
-    labels = sk_measure_label(mask) 
-    props = regionprops(labels) 
+    props_image  = regionprops(labels_image)
+    props_polygon = regionprops(labels_polygon)
+
+    image.polygon_area = np.array([prop.area for prop in props_polygon]).sum()
+    image.items_area= np.array([prop.area for prop in props_image]).sum() - image.polygon_area
+
+    return image
+
+
+def polygon_detection(image: Image):
+
+    labels = sk_measure_label(image.mask) 
+    props = regionprops(labels)
 
     polygons = np.array([prop.centroid[0] for prop in props])
     index = 0
     if(len(polygons) != 0):
         index = polygons.argmin()
 
-    return labels == (index + 1)
+    image.polygon = (labels == (index + 1))
+
+    return image
+
+def items_detection(image: Image):
+
+    bitwise_not_polygon = cv2.bitwise_not(image.polygon.astype("uint8"))
+    items = cv2.bitwise_and(image.mask.astype("uint8"), bitwise_not_polygon)
+
+    labels = sk_measure_label(items) 
+    props  = regionprops(labels)
+    for index in range(len(props)):
+        image.items.append(labels == (index + 1))
+
+    return image
+
 
 
 def processing_source_data():
@@ -120,30 +159,13 @@ def processing_source_data():
 def read_files(image_path: str):
     image_list = []
 
-    true = "True"
-    false = "False"
-    error = "Error"
+    for case in Cases:
+        for filename in os.listdir(f"{image_path}\\{case.name}"):
+            if filename.endswith(".jpg"):
+                origin_image = imread(os.path.join(f"{image_path}\\{case.name}", filename))
+                image = Image(name = filename, case = case, origin = origin_image)
+                image_list.append(image)    
 
-    for filename in os.listdir(image_path + "\\" + true):
-        if filename.endswith(".jpg"):
-            origin_image = imread(os.path.join(image_path + "\\" + true, filename))
-            image = Image(filename, true, origin_image) 
-            image_list.append(image)    
-
-
-    for filename in os.listdir(image_path + "\\" + false):
-        if filename.endswith(".jpg"):
-            origin_image = imread(os.path.join(image_path + "\\" + false, filename))
-            image = Image(filename, false, origin_image) 
-            image_list.append(image)  
-
-
-    for filename in os.listdir(image_path + "\\" + error):
-        if filename.endswith(".jpg"):
-            origin_image = imread(os.path.join(image_path + "\\" + error, filename))
-            image = Image(filename, error, origin_image) 
-            image_list.append(image)  
-    
     return image_list
 
 
@@ -152,10 +174,13 @@ def processing_input_data():
     config = Config()
     images = read_files(config.input_image_path)
 
-    placement_success = 0
+    algorithm_success = 0
     tests_count = 0
 
     for image in images:
+        image.items = []
+        image.test= []
+        image.item_area = []
         tests_count += 1
 
         image_blur_gray = rgb2gray(gaussian(image.origin, sigma = config.gaussian_sigma_canny, channel_axis= True))
@@ -171,32 +196,92 @@ def processing_input_data():
         mask = binary_fill_holes(mask)
         mask = binary_opening(mask, footprint=np.ones((15, 15)))
 
-        image.mask = mask        
-        image.polygon = polygon_detection(mask)
+        image.mask = mask    
+        image = polygon_detection(image)
+        image = find_area(image)
+        image = items_detection(image)
 
-        fit = fit_in_polygon(image.polygon, image.mask)
-
-        if(fit == image.case):
-            image.result = "True"
-            placement_success += 1
-
+        if is_error(image):
+            error_image = imread(os.path.join("intelligent_placer_lib", "error.png"))
+            image.polygon = error_image
+            case = Cases.ERROR
         else:
-            image.result = "False"
+            case = fit_in_polygon(image)
+
+        if case == image.case:
+            algorithm_success += 1
+
+        image.result = case.name
       
-    return images, placement_success/tests_count
+    return images, algorithm_success/tests_count
 
-def fit_in_polygon(polygon_mask, image_mask):
-    labels_image  = sk_measure_label(image_mask)
-    labels_polygon = sk_measure_label(polygon_mask) 
+def rotate(image, angle):
+    rotated = image.astype(np.uint8)
+    (h, w) = rotated.shape[:2]
+    center = (int(w / 2), int(h / 2))
+    rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1)
+    rotated  = cv2.warpAffine(rotated , rotation_matrix, (w, h))
+    vertical_indices = np.where(np.any(rotated , axis=1))[0]
+    top, bottom = vertical_indices[0], vertical_indices[-1]
+    horizontal_indices = np.where(np.any(rotated , axis=0))[0]
+    left, right = horizontal_indices[0], horizontal_indices[-1]
+    rotated = rotated[top:bottom, left:right]
 
-    props_image  = regionprops(labels_image )
-    props_polygon = regionprops(labels_polygon) 
+    return rotated
 
-    area_image = np.array([prop.area for prop in props_image]).sum()
-    area_polygon = np.array([prop.area for prop in props_polygon]).sum()
 
-    if(area_image - 2* area_polygon > 0):
-        return "False"
-       
-    return "True"
+def is_error(image: Image):
+    y, x = image.mask.shape
+    polygon = image.mask[0:y//2+50, 0:x]
+    labels_polygon = sk_measure_label(polygon)
+    props_polygon = regionprops(labels_polygon)
+
+    if len(props_polygon) != 1 or image.items_area == 0:
+        return True
+
+
+def is_item_fit(image: Image, item):
+    vertical_indices = np.where(np.any(image.polygon, axis=1))[0]
+    top_p, bottom_p = vertical_indices[0], vertical_indices[-1]
+
+    horizontal_indices = np.where(np.any(image.polygon, axis=0))[0]
+    left_p, right_p = horizontal_indices[0], horizontal_indices[-1]
+
+    image.polygon = image.polygon[top_p:bottom_p, left_p:right_p]
+
+    polygon_y, polygon_x = image.polygon.shape
+
+    for angle in range(100, 360, 5):
+
+        item_rotated  = rotate(item, angle)
+        item_y, item_x = item_rotated.shape
+
+        for y in range(0,  polygon_y - item_y, 1):
+            for x in range(0, polygon_x - item_x, 5):
+
+                item_contour_box = image.polygon[y: y + item_y, x: x + item_x].astype(int)
+                bitwise_and = cv2.bitwise_and(item_contour_box.astype("uint8"), item_rotated.astype("uint8"))
+
+                if np.sum(bitwise_and) == np.sum(item_rotated):
+                    image.polygon[y: y + item_y, x: x + item_x] = cv2.bitwise_xor(item_contour_box.astype("uint8"), item_rotated.astype("uint8"))
+                    return Cases.TRUE
+
+    return Cases.FALSE
+
+
+
+def fit_in_polygon(image: Image):
+
+    false_image = imread(os.path.join("intelligent_placer_lib", "false.jpg"))
+
+    if image.items_area > image.polygon_area:
+        image.polygon = false_image
+        return Cases.FALSE
+
+    for item in image.items:   
+        if is_item_fit(image, item) == Cases.FALSE:
+            image.polygon = false_image
+            return Cases.FALSE
+          
+    return Cases.TRUE
 
