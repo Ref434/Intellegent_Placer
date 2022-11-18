@@ -35,8 +35,8 @@ class Config():
     image_width: int = 960
     image_height: int = 1280
 
-    source_image_path = "data\Objects"
-    input_image_path = "data\InputData"
+    source_image_path: str = "data\Objects"
+    input_image_path: str = "data\InputData"
 
 
 
@@ -59,7 +59,7 @@ class Image():
 
       
 
-def get_central_component(mask, config):
+def _get_central_component(mask, config):
 
     labels = sk_measure_label(mask) 
     props = regionprops(labels) 
@@ -82,7 +82,8 @@ def get_central_component(mask, config):
 
     return labels == (central_comp_id + 1)
 
-def find_area(image: Image):
+
+def _find_area(image: Image):
     labels_polygon = sk_measure_label(image.polygon)
     labels_image  = sk_measure_label(image.mask)
 
@@ -92,10 +93,9 @@ def find_area(image: Image):
     image.polygon_area = np.array([prop.area for prop in props_polygon]).sum()
     image.items_area= np.array([prop.area for prop in props_image]).sum() - image.polygon_area
 
-    return image
 
 
-def polygon_detection(image: Image):
+def _polygon_detection(image: Image):
 
     labels = sk_measure_label(image.mask) 
     props = regionprops(labels)
@@ -107,19 +107,23 @@ def polygon_detection(image: Image):
 
     image.polygon = (labels == (index + 1))
 
-    return image
+def custom_key(item):
+    label = sk_measure_label(item) 
+    prop  = regionprops(label)
+    return prop[0].area
 
-def items_detection(image: Image):
+def _items_detection(image: Image):
 
     bitwise_not_polygon = cv2.bitwise_not(image.polygon.astype("uint8"))
     items = cv2.bitwise_and(image.mask.astype("uint8"), bitwise_not_polygon)
 
     labels = sk_measure_label(items) 
     props  = regionprops(labels)
+
     for index in range(len(props)):
         image.items.append(labels == (index + 1))
-
-    return image
+    
+    image.items.sort(key = custom_key, reverse = True)
 
 
 
@@ -136,43 +140,35 @@ def processing_source_data():
 
         res_otsu = binary_closing(res_otsu, footprint=np.ones((40, 40)))
         res_otsu = binary_opening(res_otsu, footprint=np.ones((10, 10)))
-        res_otsu = get_central_component(res_otsu, config)
+        res_otsu = _get_central_component(res_otsu, config)
 
 
         mask = (res_otsu * 255).astype("uint8")
         result = cv2.bitwise_and(image, image, mask = mask)
 
-
-        vertical_indices = np.where(np.any(res_otsu, axis=1))[0]
-        top, bottom = vertical_indices[0], vertical_indices[-1]
-
-        horizontal_indices = np.where(np.any(res_otsu, axis=0))[0]
-        left, right = horizontal_indices[0], horizontal_indices[-1]
-
-        crop_mask = res_otsu[top:bottom, left:right]
-
+        crop_mask = _image_cut(res_otsu)
         
         images.append([image, crop_mask, result])
         
     return images
 
-def read_files(image_path: str):
+def _read_files(image_path: str):
     image_list = []
 
     for case in Cases:
-        for filename in os.listdir(f"{image_path}\\{case.name}"):
+        case_folder = os.path.join(image_path, case.name)
+        for filename in os.listdir(case_folder):
             if filename.endswith(".jpg"):
-                origin_image = imread(os.path.join(f"{image_path}\\{case.name}", filename))
+                origin_image = imread(os.path.join(case_folder, filename))
                 image = Image(name = filename, case = case, origin = origin_image)
                 image_list.append(image)    
 
     return image_list
 
 
-
 def processing_input_data():
     config = Config()
-    images = read_files(config.input_image_path)
+    images = _read_files(config.input_image_path)
 
     algorithm_success = 0
     tests_count = 0
@@ -197,16 +193,16 @@ def processing_input_data():
         mask = binary_opening(mask, footprint=np.ones((15, 15)))
 
         image.mask = mask    
-        image = polygon_detection(image)
-        image = find_area(image)
-        image = items_detection(image)
+        _polygon_detection(image)
+        _find_area(image)
+        _items_detection(image)
 
-        if is_error(image):
+        if _is_error(image):
             error_image = imread(os.path.join("intelligent_placer_lib", "error.png"))
             image.polygon = error_image
             case = Cases.ERROR
         else:
-            case = fit_in_polygon(image)
+            case = _fit_in_polygon(image)
 
         if case == image.case:
             algorithm_success += 1
@@ -215,22 +211,20 @@ def processing_input_data():
       
     return images, algorithm_success/tests_count
 
-def rotate(image, angle):
+
+def _rotate(image, angle):
     rotated = image.astype(np.uint8)
+
     (h, w) = rotated.shape[:2]
     center = (int(w / 2), int(h / 2))
+
     rotation_matrix = cv2.getRotationMatrix2D(center, angle, 1)
     rotated  = cv2.warpAffine(rotated , rotation_matrix, (w, h))
-    vertical_indices = np.where(np.any(rotated , axis=1))[0]
-    top, bottom = vertical_indices[0], vertical_indices[-1]
-    horizontal_indices = np.where(np.any(rotated , axis=0))[0]
-    left, right = horizontal_indices[0], horizontal_indices[-1]
-    rotated = rotated[top:bottom, left:right]
 
-    return rotated
+    return _image_cut(rotated)
 
 
-def is_error(image: Image):
+def _is_error(image: Image):
     y, x = image.mask.shape
     polygon = image.mask[0:y//2+50, 0:x]
     labels_polygon = sk_measure_label(polygon)
@@ -240,20 +234,25 @@ def is_error(image: Image):
         return True
 
 
-def is_item_fit(image: Image, item):
-    vertical_indices = np.where(np.any(image.polygon, axis=1))[0]
-    top_p, bottom_p = vertical_indices[0], vertical_indices[-1]
+def _image_cut(image):
+    vertical_indices = np.where(np.any(image, axis=1))[0]
+    top, bottom = vertical_indices[0], vertical_indices[-1]
 
-    horizontal_indices = np.where(np.any(image.polygon, axis=0))[0]
-    left_p, right_p = horizontal_indices[0], horizontal_indices[-1]
+    horizontal_indices = np.where(np.any(image, axis=0))[0]
+    left, right = horizontal_indices[0], horizontal_indices[-1]
 
-    image.polygon = image.polygon[top_p:bottom_p, left_p:right_p]
+    return image[top:bottom, left:right]
+
+
+def _is_item_fit(image: Image, item):
+
+    image.polygon = _image_cut(image.polygon)
 
     polygon_y, polygon_x = image.polygon.shape
 
-    for angle in range(100, 360, 5):
+    for angle in range(0, 360, 5):
 
-        item_rotated  = rotate(item, angle)
+        item_rotated  = _rotate(item, angle)
         item_y, item_x = item_rotated.shape
 
         for y in range(0,  polygon_y - item_y, 1):
@@ -269,8 +268,7 @@ def is_item_fit(image: Image, item):
     return Cases.FALSE
 
 
-
-def fit_in_polygon(image: Image):
+def _fit_in_polygon(image: Image):
 
     false_image = imread(os.path.join("intelligent_placer_lib", "false.jpg"))
 
@@ -279,9 +277,8 @@ def fit_in_polygon(image: Image):
         return Cases.FALSE
 
     for item in image.items:   
-        if is_item_fit(image, item) == Cases.FALSE:
+        if _is_item_fit(image, item) == Cases.FALSE:
             image.polygon = false_image
             return Cases.FALSE
           
     return Cases.TRUE
-
