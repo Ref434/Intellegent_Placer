@@ -1,3 +1,4 @@
+from xmlrpc.client import boolean
 from imageio.core.util import Array
 import cv2
 import os
@@ -38,6 +39,14 @@ class Config():
     source_image_path: str = "data\Objects"
     input_image_path: str = "data\InputData"
 
+    false_image: str = "intelligent_placer_lib\\false.jpg"
+    error_image: str = "intelligent_placer_lib\\error.png"
+
+    max_angle: int = 360
+    step_angle: int = 5
+    step_x: int = 5
+    step_y: int = 1
+
 
 
 
@@ -52,10 +61,8 @@ class Image():
     result: Cases = None  # values : True, False, Error
     polygon_area: float = None
     items_area: float = None
-    fit = None
     items = []
     result_image = None
-    test = []
 
       
 
@@ -123,7 +130,8 @@ def _items_detection(image: Image):
     for index in range(len(props)):
         image.items.append(labels == (index + 1))
     
-    image.items.sort(key = custom_key, reverse = True)
+    # Sorting by area
+    image.items.sort(key = custom_key, reverse = True)    
 
 
 
@@ -175,7 +183,6 @@ def processing_input_data():
 
     for image in images:
         image.items = []
-        image.test= []
         image.item_area = []
         tests_count += 1
 
@@ -198,11 +205,11 @@ def processing_input_data():
         _items_detection(image)
 
         if _is_error(image):
-            error_image = imread(os.path.join("intelligent_placer_lib", "error.png"))
+            error_image = imread(config.error_image)
             image.polygon = error_image
             case = Cases.ERROR
         else:
-            case = _fit_in_polygon(image)
+            case = _fit_in_polygon(image, config)
 
         if case == image.case:
             algorithm_success += 1
@@ -212,8 +219,11 @@ def processing_input_data():
     return images, algorithm_success/tests_count
 
 
-def _rotate(image, angle):
-    rotated = image.astype(np.uint8)
+"""
+_rotate(item, angle) - Rotate the item to fit into a polygon
+"""
+def _rotate(item, angle):
+    rotated = item.astype(np.uint8)
 
     (h, w) = rotated.shape[:2]
     center = (int(w / 2), int(h / 2))
@@ -224,7 +234,10 @@ def _rotate(image, angle):
     return _image_cut(rotated)
 
 
-def _is_error(image: Image):
+"""
+_is_error(image: Image) - Checking error cases
+"""
+def _is_error(image: Image) -> bool:
     y, x = image.mask.shape
     polygon = image.mask[0:y//2+50, 0:x]
     labels_polygon = sk_measure_label(polygon)
@@ -233,7 +246,12 @@ def _is_error(image: Image):
     if len(props_polygon) != 1 or image.items_area == 0:
         return True
 
+    return False
 
+
+"""
+_image_cut(image) - Intended for subsequent use in bit operations
+"""
 def _image_cut(image):
     vertical_indices = np.where(np.any(image, axis=1))[0]
     top, bottom = vertical_indices[0], vertical_indices[-1]
@@ -244,19 +262,19 @@ def _image_cut(image):
     return image[top:bottom, left:right]
 
 
-def _is_item_fit(image: Image, item):
+def _is_item_fit(image: Image, item , config: Config) -> Cases:
 
     image.polygon = _image_cut(image.polygon)
 
     polygon_y, polygon_x = image.polygon.shape
 
-    for angle in range(0, 360, 5):
+    for angle in range(0, config.max_angle, config.step_angle):
 
         item_rotated  = _rotate(item, angle)
         item_y, item_x = item_rotated.shape
 
-        for y in range(0,  polygon_y - item_y, 1):
-            for x in range(0, polygon_x - item_x, 5):
+        for y in range(0,  polygon_y - item_y, config.step_y):
+            for x in range(0, polygon_x - item_x, config.step_x):
 
                 item_contour_box = image.polygon[y: y + item_y, x: x + item_x].astype(int)
                 bitwise_and = cv2.bitwise_and(item_contour_box.astype("uint8"), item_rotated.astype("uint8"))
@@ -268,16 +286,16 @@ def _is_item_fit(image: Image, item):
     return Cases.FALSE
 
 
-def _fit_in_polygon(image: Image):
+def _fit_in_polygon(image: Image , config: Config) -> Cases:
 
-    false_image = imread(os.path.join("intelligent_placer_lib", "false.jpg"))
+    false_image = imread(config.false_image)
 
     if image.items_area > image.polygon_area:
         image.polygon = false_image
         return Cases.FALSE
 
     for item in image.items:   
-        if _is_item_fit(image, item) == Cases.FALSE:
+        if _is_item_fit(image, item, config) == Cases.FALSE:
             image.polygon = false_image
             return Cases.FALSE
           
