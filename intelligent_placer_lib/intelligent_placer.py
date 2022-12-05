@@ -1,13 +1,9 @@
-from xmlrpc.client import boolean
 from imageio.core.util import Array
 import cv2
 import os
-import math
 import numpy as np
 from imageio import imread
-from skimage.color import rgb2gray
-from skimage.feature import canny
-from skimage.filters import gaussian, threshold_otsu
+from skimage.filters import threshold_otsu
 from skimage.morphology import binary_closing,  binary_opening
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import regionprops
@@ -24,19 +20,29 @@ class Cases(Enum):
 
 class Config():
 
-    gaussian_sigma_threshold: float = 3.0
-    gaussian_sigma_canny: float = 1.5
+    gaussian_sigma: float = 0
 
-    canny_sigma: float = 0.3
-    canny_low_threshold: float = 0.01
-    canny_high_threshold: float = 0.45
+    canny_low_threshold: float = 40
+    canny_high_threshold: float = 55
 
-    binary_closing_footprint_width: int = 5
-    binary_closing_footprint = np.ones(
-        (binary_closing_footprint_width, binary_closing_footprint_width))
+    threshold_closing_footprint_width: int = 40
+    threshold_closing_footprint = np.ones(
+        (threshold_closing_footprint_width, threshold_closing_footprint_width))
 
-    image_width: int = 960
-    image_height: int = 1280
+    threshold_opening_footprint_width: int = 10
+    threshold_opening_footprint = np.ones(
+        (threshold_opening_footprint_width, threshold_opening_footprint_width))
+
+    canny_closing_footprint_width: int = 3
+    canny_closing_footprint = np.ones(
+        (canny_closing_footprint_width, canny_closing_footprint_width))
+
+    canny_opening_footprint_width: int = 5
+    canny_opening_footprint = np.ones(
+        (canny_opening_footprint_width, canny_opening_footprint_width))
+
+    gaussian_footprint_width: int = 5
+    gaussian_footprint = (gaussian_footprint_width, gaussian_footprint_width)
 
     source_image_path: str = "data\Objects"
     input_image_path: str = "data\InputData"
@@ -63,30 +69,8 @@ class Image():
     items_area: float = None
     items = []
     result_image = None
+    test = None
 
-
-def _get_central_component(mask, config):
-
-    labels = sk_measure_label(mask)
-    props = regionprops(labels)
-
-    centers = [prop.centroid for prop in props]
-
-    difference = math.sqrt((config.image_height/2)**2
-                           + (config.image_width/2)**2)
-
-    i = 0
-    for center in centers:
-        new_difference = math.sqrt((config.image_height/2 - center[0])**2
-                                   + (config.image_width/2 - center[1])**2)
-
-        if (new_difference < difference):
-            central_comp_id = i
-            difference = new_difference
-
-        i += 1
-
-    return labels == (central_comp_id + 1)
 
 
 def _find_area(image: Image):
@@ -132,7 +116,7 @@ def _items_detection(image: Image):
         image.items.append(labels == (index + 1))
 
     # Sorting by area
-    image.items.sort(key=_custom_key, reverse=True)
+    image.items.sort(key = _custom_key, reverse=True)
 
 
 def processing_source_data():
@@ -141,22 +125,19 @@ def processing_source_data():
 
     for filename in os.listdir(config.source_image_path):
         image = imread(os.path.join(config.source_image_path, filename))
-        image_blur_gray = rgb2gray(
-            gaussian(image, sigma=config.gaussian_sigma_threshold, channel_axis=True))
 
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        image_blur_gray = cv2.GaussianBlur(image_gray, (1, 1), config.gaussian_sigma)
         thresh_otsu = threshold_otsu(image_blur_gray)
         res_otsu = image_blur_gray <= thresh_otsu
 
-        res_otsu = binary_closing(res_otsu, footprint=np.ones((40, 40)))
-        res_otsu = binary_opening(res_otsu, footprint=np.ones((10, 10)))
-        res_otsu = _get_central_component(res_otsu, config)
+        res_otsu = binary_closing(res_otsu, footprint = config.threshold_closing_footprint)
 
         mask = (res_otsu * 255).astype("uint8")
         result = cv2.bitwise_and(image, image, mask=mask)
 
-        crop_mask = _image_cut(res_otsu)
 
-        images.append([image, crop_mask, result])
+        images.append([image, res_otsu, result])
 
     return images
 
@@ -213,29 +194,26 @@ def _image_processing(image: Image, config: Config):
     image.items = []
     image.item_area = []
 
-    image_blur_gray = rgb2gray(
-        gaussian(image.origin, sigma=config.gaussian_sigma_canny, channel_axis=True))
-    mask = binary_closing(
-        canny(
-            image_blur_gray,
-            sigma=config.canny_sigma,
-            low_threshold=config.canny_low_threshold,
-            high_threshold=config.canny_high_threshold,
-        ),
-        footprint=config.binary_closing_footprint
-    )
+    mask = cv2.cvtColor(image.origin, cv2.COLOR_BGR2GRAY)
+    mask = cv2.GaussianBlur(mask, config.gaussian_footprint, config.gaussian_sigma)
+    mask = cv2.Canny(mask, config.canny_low_threshold, config.canny_high_threshold)
+
+    mask = binary_closing(mask, footprint = config.canny_closing_footprint)
     mask = binary_fill_holes(mask)
-    mask = binary_opening(mask, footprint=np.ones((15, 15)))
+    mask = binary_opening(mask, footprint = config.canny_opening_footprint)
     image.mask = mask
+    
 
     _polygon_detection(image)
     _find_area(image)
     _items_detection(image)
 
 
+
 def check_image(path: str):
     config = Config()
     image = _read_one_file(path)
+
     _image_processing(image, config)
 
     if _is_error(image):
@@ -270,7 +248,7 @@ _is_error(image: Image) - Checking error cases
 """
 def _is_error(image: Image) -> bool:
     y, x = image.mask.shape
-    polygon = image.mask[0:y//2+50, 0:x]
+    polygon = image.mask[0:y//2, 0:x]
     labels_polygon = sk_measure_label(polygon)
     props_polygon = regionprops(labels_polygon)
 
