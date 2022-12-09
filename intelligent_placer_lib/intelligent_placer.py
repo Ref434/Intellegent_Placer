@@ -1,4 +1,6 @@
-from imageio.core.util import Array
+from intelligent_placer_lib.config import Cases, Config
+from intelligent_placer_lib.image import Image
+
 import cv2
 import os
 import numpy as np
@@ -8,68 +10,6 @@ from skimage.morphology import binary_closing,  binary_opening
 from scipy.ndimage import binary_fill_holes
 from skimage.measure import regionprops
 from skimage.measure import label as sk_measure_label
-from dataclasses import dataclass
-from enum import Enum
-
-
-class Cases(Enum):
-    TRUE = 1
-    FALSE = 2
-    ERROR = 3
-
-
-class Config():
-
-    gaussian_sigma: float = 0
-
-    canny_low_threshold: float = 40
-    canny_high_threshold: float = 55
-
-    threshold_closing_footprint_width: int = 40
-    threshold_closing_footprint = np.ones(
-        (threshold_closing_footprint_width, threshold_closing_footprint_width))
-
-    threshold_opening_footprint_width: int = 10
-    threshold_opening_footprint = np.ones(
-        (threshold_opening_footprint_width, threshold_opening_footprint_width))
-
-    canny_closing_footprint_width: int = 3
-    canny_closing_footprint = np.ones(
-        (canny_closing_footprint_width, canny_closing_footprint_width))
-
-    canny_opening_footprint_width: int = 5
-    canny_opening_footprint = np.ones(
-        (canny_opening_footprint_width, canny_opening_footprint_width))
-
-    gaussian_footprint_width: int = 5
-    gaussian_footprint = (gaussian_footprint_width, gaussian_footprint_width)
-
-    source_image_path: str = "data\Objects"
-    input_image_path: str = "data\InputData"
-
-    false_image: str = "intelligent_placer_lib\\false.jpg"
-    error_image: str = "intelligent_placer_lib\\error.png"
-
-    max_angle: int = 360
-    step_angle: int = 5
-    step_x: int = 5
-    step_y: int = 1
-
-
-@dataclass
-class Image():
-
-    name: str = None
-    case: Cases = None  # values : True, False, Error
-    origin: Array = None
-    mask = None
-    polygon = None
-    result: Cases = None  # values : True, False, Error
-    polygon_area: float = None
-    items_area: float = None
-    items = []
-    result_image = None
-    test = None
 
 
 
@@ -116,7 +56,7 @@ def _items_detection(image: Image):
         image.items.append(labels == (index + 1))
 
     # Sorting by area
-    image.items.sort(key = _custom_key, reverse=True)
+    image.items.sort(key=_custom_key, reverse=True)
 
 
 def processing_source_data():
@@ -127,15 +67,16 @@ def processing_source_data():
         image = imread(os.path.join(config.source_image_path, filename))
 
         image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        image_blur_gray = cv2.GaussianBlur(image_gray, (1, 1), config.gaussian_sigma)
+        image_blur_gray = cv2.GaussianBlur(
+            image_gray, (1, 1), config.gaussian_sigma)
         thresh_otsu = threshold_otsu(image_blur_gray)
         res_otsu = image_blur_gray <= thresh_otsu
 
-        res_otsu = binary_closing(res_otsu, footprint = config.threshold_closing_footprint)
+        res_otsu = binary_closing(
+            res_otsu, footprint=config.threshold_closing_footprint)
 
         mask = (res_otsu * 255).astype("uint8")
         result = cv2.bitwise_and(image, image, mask=mask)
-
 
         images.append([image, res_otsu, result])
 
@@ -195,19 +136,19 @@ def _image_processing(image: Image, config: Config):
     image.item_area = []
 
     mask = cv2.cvtColor(image.origin, cv2.COLOR_BGR2GRAY)
-    mask = cv2.GaussianBlur(mask, config.gaussian_footprint, config.gaussian_sigma)
-    mask = cv2.Canny(mask, config.canny_low_threshold, config.canny_high_threshold)
+    mask = cv2.GaussianBlur(
+        mask, config.gaussian_footprint, config.gaussian_sigma)
+    mask = cv2.Canny(mask, config.canny_low_threshold,
+                     config.canny_high_threshold)
 
-    mask = binary_closing(mask, footprint = config.canny_closing_footprint)
+    mask = binary_closing(mask, footprint=config.canny_closing_footprint)
     mask = binary_fill_holes(mask)
-    mask = binary_opening(mask, footprint = config.canny_opening_footprint)
+    mask = binary_opening(mask, footprint=config.canny_opening_footprint)
     image.mask = mask
-    
 
     _polygon_detection(image)
     _find_area(image)
     _items_detection(image)
-
 
 
 def check_image(path: str):
@@ -231,6 +172,8 @@ def check_image(path: str):
 """
 _rotate(item, angle) - Rotate the item to fit into a polygon
 """
+
+
 def _rotate(item, angle):
     rotated = item.astype(np.uint8)
 
@@ -246,6 +189,8 @@ def _rotate(item, angle):
 """
 _is_error(image: Image) - Checking error cases
 """
+
+
 def _is_error(image: Image) -> bool:
     y, x = image.mask.shape
     polygon = image.mask[0:y//2, 0:x]
@@ -261,6 +206,8 @@ def _is_error(image: Image) -> bool:
 """
 _image_cut(image) - Intended for subsequent use in bit operations
 """
+
+
 def _image_cut(image):
     vertical_indices = np.where(np.any(image, axis=1))[0]
     top, bottom = vertical_indices[0], vertical_indices[-1]
@@ -285,7 +232,8 @@ def _is_item_fit(image: Image, item, config: Config) -> Cases:
         for y in range(0,  polygon_y - item_y, config.step_y):
             for x in range(0, polygon_x - item_x, config.step_x):
 
-                item_contour_box = image.polygon[y: y + item_y, x: x + item_x].astype(int)
+                item_contour_box = image.polygon[y: y +
+                                                 item_y, x: x + item_x].astype(int)
                 bitwise_and = cv2.bitwise_and(item_contour_box.astype(
                     "uint8"), item_rotated.astype("uint8"))
 
